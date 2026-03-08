@@ -1,0 +1,568 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{parskip}
+\usepackage{microtype}
+\usepackage{xcolor}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+% Theorem environments
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% Notation
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\operatorname{Var}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\sig}{\sigma}           % logistic sigmoid
+\newcommand{\bY}{\mathbf{Y}}
+\newcommand{\bX}{\mathbf{X}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\bbeta}{\boldsymbol{\beta}}
+\newcommand{\btheta}{\boldsymbol{\theta}}
+\newcommand{\given}{\mid}
+\newcommand{\logit}{\operatorname{logit}}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+\title{\textbf{Theory and Proofs for MCEM in Logistic GLMMs}\\[0.5em]
+       \large A self-contained reference for the \texttt{glmm-mcem} package}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{The Model}
+% ============================================================
+
+\subsection{Setup and notation}
+
+Let there be $n$ subjects, each contributing $K_i$ binary observations.
+For subject $i \in \{1,\ldots,n\}$ and observation $j \in \{1,\ldots,K_i\}$:
+
+\begin{itemize}
+  \item $Y_{ij} \in \{0,1\}$ is the binary response.
+  \item $\bX_{ij} \in \R^p$ is the fixed-effects covariate vector.
+  \item $u_i \in \R$ is a \emph{random intercept} specific to subject $i$.
+  \item $\bbeta \in \R^p$ is the unknown fixed-effect parameter vector.
+  \item $V_u > 0$ is the unknown random-effect variance.
+\end{itemize}
+
+\begin{definition}[Logistic GLMM]
+The model is specified by two components:
+\begin{align}
+  Y_{ij} \given u_i &\sim \operatorname{Bernoulli}\!\bigl(\sig(\bX_{ij}^\top\bbeta + u_i)\bigr), \label{eq:cond-lik}\\
+  u_i &\overset{\mathrm{iid}}{\sim} \N(0, V_u), \label{eq:prior}
+\end{align}
+where $\sig(x) = (1+e^{-x})^{-1}$ is the logistic sigmoid, and observations
+are conditionally independent given $\bu = (u_1,\ldots,u_n)$.
+\end{definition}
+
+Let $\btheta = (\bbeta, V_u)$ denote the full parameter vector.
+Write $\bY_i = (Y_{i1},\ldots,Y_{iK_i})^\top$ and $\bX_i$ for the stacked
+covariate rows for subject $i$.
+
+\subsection{Conditional log-likelihood}
+
+Let $\mu_{ij} = \sig(\bX_{ij}^\top\bbeta + u_i)$.
+The conditional probability of a single observation follows from the Bernoulli
+distribution:
+\begin{equation}
+  p(Y_{ij} \given u_i, \bbeta) = \mu_{ij}^{Y_{ij}}(1-\mu_{ij})^{1-Y_{ij}}.
+  \label{eq:bernoulli}
+\end{equation}
+Taking the log and summing over $j$, using $\eta_{ij} = \bX_{ij}^\top\bbeta + u_i$:
+\begin{equation}
+  \ell_i(u_i; \bbeta) = \log p(\bY_i \given u_i, \bbeta)
+    = \sum_{j=1}^{K_i} \bigl[
+        Y_{ij}\,\eta_{ij} - \log(1 + e^{\eta_{ij}})
+      \bigr],
+  \label{eq:cond-loglik}
+\end{equation}
+which follows because $\log\mu_{ij} = \eta_{ij} - \log(1+e^{\eta_{ij}})$ and
+$\log(1-\mu_{ij}) = -\log(1+e^{\eta_{ij}})$.
+
+\subsection{Marginal likelihood and the intractability problem}
+
+The marginal log-likelihood is obtained by integrating out the random effects:
+
+\begin{equation}
+  \ell(\btheta) = \sum_{i=1}^n \log \int_{-\infty}^{\infty}
+    p(\bY_i \given u_i, \bbeta)\, p(u_i \given V_u)\, \mathrm{d}u_i.
+  \label{eq:marginal}
+\end{equation}
+
+The integrand is a product of Bernoulli likelihood terms (with logistic link)
+and a Gaussian density.  Unlike the Gaussian GLMM, this product does not yield
+a recognisable form: the logistic likelihood is not conjugate to the Gaussian
+prior, so the posterior $p(u_i \given \bY_i, \btheta)$ does not belong to a
+known exponential family.  If it did, the integral in \eqref{eq:marginal}
+would reduce to a tractable exponential-family expression and the E-step
+expectations would be available in closed form.  Without conjugacy, no such
+reduction is possible, the integral has \emph{no closed form}, and numerical
+integration or posterior sampling is required.  This motivates MCEM.
+
+% ============================================================
+\section{The EM Algorithm}
+% ============================================================
+
+\subsection{Complete-data formulation}
+
+Treat $((\bY_i, u_i))_{i=1}^n$ as the \emph{complete data}.  The
+complete-data log-likelihood decomposes as
+
+\begin{equation}
+  \ell_c(\btheta) = \sum_{i=1}^n \ell_i(u_i;\bbeta)
+    + \sum_{i=1}^n \log \phi(u_i; 0, V_u),
+  \label{eq:complete-loglik}
+\end{equation}
+where $\phi(\cdot\,;\mu,V)$ denotes the $\N(\mu,V)$ density.
+
+\subsection{The Q-function}
+
+Given current parameter estimates $\btheta^{(t)}$, define
+
+\begin{equation}
+  Q(\btheta \given \btheta^{(t)})
+    = \E_{\bu \given \bY,\btheta^{(t)}}\bigl[\ell_c(\btheta)\bigr]
+    = \sum_{i=1}^n \E\bigl[\ell_i(u_i;\bbeta) \given \bY_i, \btheta^{(t)}\bigr]
+    - \frac{n}{2}\log(2\pi V_u)
+    - \frac{1}{2V_u}\sum_{i=1}^n \E\bigl[u_i^2 \given \bY_i, \btheta^{(t)}\bigr].
+  \label{eq:Q}
+\end{equation}
+
+\subsection{Ascent property of EM}
+
+\begin{theorem}[EM ascent]\label{thm:em-ascent}
+If $\btheta^{(t+1)} = \argmax_{\btheta} Q(\btheta \given \btheta^{(t)})$,
+then $\ell(\btheta^{(t+1)}) \geq \ell(\btheta^{(t)})$.
+\end{theorem}
+
+\begin{proof}
+By Bayes' theorem,
+\[
+  \log p(\bY \given \btheta)
+    = \log p(\bY, \bu \given \btheta) - \log p(\bu \given \bY, \btheta).
+\]
+Taking the expectation under $p(\bu \given \bY, \btheta^{(t)})$ on both sides:
+\begin{equation}
+  \ell(\btheta) = Q(\btheta \given \btheta^{(t)}) - H(\btheta \given \btheta^{(t)}),
+  \label{eq:decomp}
+\end{equation}
+where
+\[
+  H(\btheta \given \btheta^{(t)})
+    = \E_{\bu \given \bY, \btheta^{(t)}}\!\bigl[\log p(\bu \given \bY, \btheta)\bigr]
+\]
+is the expected log-posterior of $\bu$ under the \emph{current}-parameter
+posterior $p(\bu \given \bY, \btheta^{(t)})$, evaluated at a candidate $\btheta$.
+
+By the non-negativity of the KL divergence,
+$\mathrm{KL}\!\bigl(p(\bu \given \bY, \btheta^{(t)}) \,\|\, p(\bu \given \bY, \btheta)\bigr) \geq 0$,
+which expands to
+\[
+  \E_{\bu|\bY,\btheta^{(t)}}\!\bigl[\log p(\bu \given \bY, \btheta^{(t)})\bigr]
+  \;\geq\;
+  \E_{\bu|\bY,\btheta^{(t)}}\!\bigl[\log p(\bu \given \bY, \btheta)\bigr],
+\]
+i.e.\ $H(\btheta^{(t)} \given \btheta^{(t)}) \geq H(\btheta \given \btheta^{(t)})$.
+
+Therefore, applying \eqref{eq:decomp} at $\btheta^{(t+1)}$ and $\btheta^{(t)}$:
+\begin{align*}
+  \ell(\btheta^{(t+1)}) - \ell(\btheta^{(t)})
+  &= \bigl[Q(\btheta^{(t+1)} \given \btheta^{(t)}) - H(\btheta^{(t+1)} \given \btheta^{(t)})\bigr]\\
+  &\quad - \bigl[Q(\btheta^{(t)} \given \btheta^{(t)}) - H(\btheta^{(t)} \given \btheta^{(t)})\bigr]\\
+  &\geq Q(\btheta^{(t+1)} \given \btheta^{(t)}) - Q(\btheta^{(t)} \given \btheta^{(t)}) \geq 0,
+\end{align*}
+where the last inequality holds because $\btheta^{(t+1)}$ maximises $Q$.
+\end{proof}
+
+% ============================================================
+\section{Monte Carlo EM}
+% ============================================================
+
+\subsection{Why Monte Carlo?}
+
+The E-step requires computing $\E[u_i^k \given \bY_i, \btheta^{(t)}]$ for $k=1,2$
+and $\E[\ell_i(u_i;\bbeta) \given \bY_i, \btheta^{(t)}]$.
+All of these involve integrals against the posterior
+$p(u_i \given \bY_i, \btheta^{(t)}) \propto
+  p(\bY_i \given u_i, \bbeta^{(t)})\, \phi(u_i; 0, V_u^{(t)})$,
+which has no closed form.
+
+\subsection{Monte Carlo approximation}
+
+Draw $m$ samples $u_i^{(1)},\ldots,u_i^{(m)}$ from
+$p(u_i \given \bY_i, \btheta^{(t)})$.  Replace expectations by sample averages:
+
+\begin{equation}
+  \E\bigl[f(u_i) \given \bY_i, \btheta^{(t)}\bigr]
+  \approx \frac{1}{m}\sum_{k=1}^m f\!\left(u_i^{(k)}\right).
+\end{equation}
+
+By the strong law of large numbers this approximation is consistent as $m\to\infty$.
+
+\subsection{Effect of MC noise on convergence}
+
+\begin{remark}
+Replacing the exact E-step with a Monte Carlo approximation introduces noise into
+the Q-function maximisation.  The ascent property (Theorem~\ref{thm:em-ascent})
+no longer holds deterministically.  However, under regularity conditions (Chan
+\& Ledolter, 1995; Wei \& Tanner, 1990), MCEM converges to a neighbourhood of
+a stationary point of $\ell(\btheta)$ whose size shrinks as $m$ increases.
+A common practical strategy is to increase $m$ as iterations progress
+(\emph{increasing-$m$ MCEM}).
+\end{remark}
+
+% ============================================================
+\section{M-step for \texorpdfstring{$\bbeta$}{beta}: Score and Fisher Information}
+% ============================================================
+
+\subsection{Score contribution}
+
+Given a sample $u_i$, differentiating \eqref{eq:cond-loglik} with respect to $\bbeta$:
+\begin{equation}
+  \frac{\partial \ell_i}{\partial \bbeta}(u_i;\bbeta)
+    = \sum_j \bX_{ij}(Y_{ij} - \mu_{ij}),
+  \label{eq:score}
+\end{equation}
+where $\mu_{ij} = \sig(\bX_{ij}^\top\bbeta + u_i)$.
+This follows because
+$\tfrac{\partial}{\partial\eta}\log p(Y|\eta) = Y - \sig(\eta)$.
+
+The MC estimate of the total score is
+\begin{equation}
+  \hat{S}(\bbeta) = \sum_{i=1}^n
+    \frac{1}{m}\sum_{k=1}^m \frac{\partial \ell_i}{\partial \bbeta}(u_i^{(k)};\bbeta),
+\end{equation}
+a sum over subjects, each term averaged over MC draws.  This matches the
+standard convention that the score is the gradient of the log-likelihood
+$\sum_i \ell_i$, not its per-subject average.
+
+\subsection{Fisher information contribution}
+
+Here $\bX_i$ denotes the $K_i \times p$ design matrix whose $j$-th row is
+$\bX_{ij}^\top$.  The negative Hessian of $\ell_i$ with respect to $\bbeta$
+at fixed $u_i$ is
+
+\begin{equation}
+  \mathcal{I}_i(u_i;\bbeta)
+    = \sum_j \mu_{ij}(1-\mu_{ij})\,\bX_{ij}\bX_{ij}^\top
+    = \bX_i^\top W_i \bX_i,
+  \label{eq:fisher}
+\end{equation}
+where $W_i = \operatorname{diag}(\mu_{ij}(1-\mu_{ij})) \in \R^{K_i \times K_i}$.
+
+The MC estimate of the total Fisher information is
+\begin{equation}
+  \hat{\mathcal{I}}(\bbeta) = \sum_{i=1}^n
+    \frac{1}{m}\sum_{k=1}^m \bX_i^\top W_i^{(k)} \bX_i.
+\end{equation}
+
+\begin{remark}
+$\hat{\mathcal{I}}(\bbeta)$ is a Monte Carlo approximation to the expected
+complete-data information
+$\E_{\bu|\bY,\btheta^{(t)}}\!\bigl[-\partial^2\ell_c/\partial\bbeta^2\bigr]$,
+not the observed information of the marginal likelihood
+$-\partial^2\ell(\btheta)/\partial\bbeta^2$.
+The latter would require differentiating through the integral in
+\eqref{eq:marginal}, which is intractable.  Using the complete-data curvature
+is standard in EM implementations: it corresponds directly to the negative
+Hessian of the Q-function with respect to $\bbeta$, which is what a
+Newton step on $Q$ requires.  This approach is sometimes called the
+\emph{EM gradient} or \emph{GEM step}.
+\end{remark}
+
+\subsection{Newton-Raphson M-step}
+
+One Newton-Raphson step maximises $Q$ with respect to $\bbeta$:
+
+\begin{equation}
+  \bbeta^{(t+1)} = \bbeta^{(t)} + \alpha\,
+    \bigl[\hat{\mathcal{I}}(\bbeta^{(t)})\bigr]^{-1}
+    \hat{S}(\bbeta^{(t)}),
+  \label{eq:nr-update}
+\end{equation}
+where $\alpha \in (0,1]$ is a step-size damping factor.
+In practice a small ridge $\lambda \mathbf{I}$ is added to
+$\hat{\mathcal{I}}$ for numerical stability.
+
+% ============================================================
+\section{M-step for \texorpdfstring{$V_u$}{Vu}}
+% ============================================================
+
+\subsection{Derivation}
+
+The contribution of the prior to the complete-data log-likelihood is
+\[
+  \sum_{i=1}^n \log \phi(u_i; 0, V_u)
+    = -\frac{n}{2}\log(2\pi V_u) - \frac{1}{2V_u}\sum_{i=1}^n u_i^2.
+\]
+Setting the derivative with respect to $V_u$ to zero:
+\[
+  \frac{\partial Q}{\partial V_u} = -\frac{n}{2V_u}
+    + \frac{1}{2V_u^2}\sum_{i=1}^n \E\bigl[u_i^2 \given \bY_i, \btheta^{(t)}\bigr] = 0,
+\]
+which gives the closed-form M-step:
+
+\begin{equation}
+  V_u^{(t+1)} = \frac{1}{n}\sum_{i=1}^n \E\bigl[u_i^2 \given \bY_i, \btheta^{(t)}\bigr].
+  \label{eq:Vu-update}
+\end{equation}
+
+\subsection{Monte Carlo approximation}
+
+Replacing the conditional expectations in \eqref{eq:Vu-update} with sample averages:
+
+\begin{equation}
+  \widehat{V}_u^{(t+1)}
+    = \frac{1}{n}\sum_{i=1}^n \frac{1}{m}\sum_{k=1}^m \bigl(u_i^{(k)}\bigr)^2
+    = \frac{1}{nm}\sum_{i=1}^{n}\sum_{k=1}^{m}\bigl(u_i^{(k)}\bigr)^2.
+\end{equation}
+
+This is the mean squared MC sample, averaging over both subjects and Monte Carlo
+draws simultaneously.
+
+% ============================================================
+\section{Laplace Approximation}
+% ============================================================
+
+\subsection{Derivation}
+
+For fixed $\btheta$, the posterior of $u_i$ is
+\begin{equation}
+  p(u_i \given \bY_i, \btheta) \propto
+    \exp\!\bigl[\ell_i(u_i;\bbeta) + \log\phi(u_i;0,V_u)\bigr]
+    \eqqcolon \exp\bigl[g_i(u_i)\bigr].
+\end{equation}
+
+The second derivative of $g_i$ has a closed form.
+Differentiating $\ell_i$ twice with respect to $u$ gives
+$-\sum_j \mu_{ij}(1-\mu_{ij})$, and differentiating $\log\phi(u;0,V_u)$
+twice gives $-1/V_u$.  Therefore:
+\begin{equation}
+  g_i''(u) = -\sum_{j=1}^{K_i} \mu_{ij}(1-\mu_{ij}) - \frac{1}{V_u},
+  \label{eq:g2}
+\end{equation}
+which is strictly negative for all $u$, confirming that $g_i$ is strictly
+concave.  Strict concavity guarantees that the posterior mode $u_i^*$ is
+\emph{unique} and that the numerical search for it is \emph{well-posed and
+stable}: any unimodal bounded optimisation (such as the \texttt{minimize\_scalar}
+call in the implementation) is guaranteed to converge to the single global
+maximum regardless of the starting point, and small perturbations in $\btheta$
+or the data produce correspondingly small changes in $u_i^*$.  This stability
+is what makes the Laplace proposal reliable across iterations as $\btheta$
+evolves.  It also justifies using $u_i^*$ as the centre of the Gaussian
+approximation.
+
+Let $u_i^* = \argmax_{u} g_i(u)$ be the posterior mode.
+A second-order Taylor expansion around $u_i^*$ gives:
+\begin{equation}
+  g_i(u) \approx g_i(u_i^*) + \tfrac{1}{2}g_i''(u_i^*)(u - u_i^*)^2,
+  \label{eq:taylor}
+\end{equation}
+since $g_i'(u_i^*) = 0$ at the mode.
+
+\begin{proposition}[Laplace approximation]
+The Gaussian approximation to the posterior is
+\[
+  p(u_i \given \bY_i, \btheta) \approx \N\!\left(u_i^*,\; V_i^*\right),
+  \quad V_i^* = \bigl[-g_i''(u_i^*)\bigr]^{-1}.
+\]
+\end{proposition}
+
+\begin{proof}
+Substituting \eqref{eq:taylor} into $\exp[g_i(u)]$:
+\[
+  \exp\bigl[g_i(u)\bigr] \approx
+  \exp\bigl[g_i(u_i^*)\bigr]\cdot
+  \exp\!\left[\frac{(u-u_i^*)^2}{2V_i^*}\cdot(-1)\right],
+\]
+which after normalisation is the density of $\N(u_i^*, V_i^*)$.
+\end{proof}
+
+\subsection{Curvature via finite differences}
+
+Although the analytical form \eqref{eq:g2} exists, the implementation
+approximates $g_i''$ by a central finite difference:
+\[
+  g_i''(u_i^*) \approx \frac{g_i(u_i^*+h) - 2g_i(u_i^*) + g_i(u_i^*-h)}{h^2},
+\]
+with $h = 10^{-4}$.  This is a deliberate design choice: the \texttt{laplace}
+module depends only on the scalar function $g_i$ (via \texttt{log\_posterior})
+rather than on the score or weight functions in \texttt{likelihoods}.  The
+finite-difference approach keeps the module self-contained and makes it easy
+to extend the model (e.g.\ a different prior or link function) without
+re-deriving the curvature formula.  The approximation error is $O(h^2)$,
+negligible in practice.
+
+% ============================================================
+\section{Independence Metropolis-Hastings Sampler}
+% ============================================================
+
+\subsection{Algorithm}
+
+To sample from $\pi(u) \propto \exp[g_i(u)]$, the independence MH algorithm
+uses a \emph{fixed} proposal $q(u) = \phi(u;\, u_i^*,\, V_i^*)$ (the Laplace
+approximation) that does not depend on the current state.
+
+Given current state $u^{(s)}$, draw candidate $u^* \sim q$ and accept with
+probability
+\begin{equation}
+  \alpha(u^{(s)}, u^*) = \min\!\left(1,\;
+    \frac{\pi(u^*)\,q(u^{(s)})}{\pi(u^{(s)})\,q(u^*)}\right).
+  \label{eq:mh-accept}
+\end{equation}
+Set $u^{(s+1)} = u^*$ with probability $\alpha$, else $u^{(s+1)} = u^{(s)}$.
+
+Equivalently, accepting when $\log U < \log\alpha$ for $U \sim \mathrm{Uniform}(0,1)$,
+with log acceptance ratio
+\[
+  \log\alpha = \bigl[\log\pi(u^*) - \log q(u^*)\bigr]
+             - \bigl[\log\pi(u^{(s)}) - \log q(u^{(s)})\bigr].
+\]
+
+The chain is initialised at $u^{(0)} = u_i^*$ (the proposal centre), and
+the first \texttt{burn\_in} samples are discarded.
+
+\subsection{Detailed balance and invariance}
+
+\begin{theorem}[Invariance of independence MH]
+The Markov chain defined above has $\pi$ as its stationary distribution.
+\end{theorem}
+
+\begin{proof}
+It suffices to verify detailed balance: for any $u \neq u'$,
+\[
+  \pi(u)\,T(u' \given u) = \pi(u')\,T(u \given u'),
+\]
+where $T$ is the transition kernel.
+
+The transition density from $u$ to $u' \neq u$ is
+\[
+  T(u' \given u) = q(u')\min\!\left(1,\frac{\pi(u')q(u)}{\pi(u)q(u')}\right).
+\]
+
+Case 1: $\pi(u')/q(u') \geq \pi(u)/q(u)$.  Then
+\begin{align*}
+  \pi(u)\,T(u'\given u)
+    &= \pi(u)\,q(u')\cdot\frac{\pi(u')q(u)}{\pi(u)q(u')} = \pi(u')q(u),\\
+  \pi(u')\,T(u\given u')
+    &= \pi(u')\,q(u)\cdot 1 = \pi(u')q(u).
+\end{align*}
+
+Case 2: $\pi(u')/q(u') < \pi(u)/q(u)$ is symmetric.
+
+In both cases detailed balance holds, so $\pi$ is stationary.
+\end{proof}
+
+\subsection{Why the Laplace approximation is a good proposal}
+
+The efficiency of independence MH is governed by how closely $q$ approximates
+$\pi$.  When $q \approx \pi$, the ratio $\pi(u)/q(u)$ is nearly constant and
+the acceptance probability \eqref{eq:mh-accept} is close to 1 for most
+proposals.  Tail behaviour is particularly important for independence samplers.
+If $q$ has \emph{lighter tails} than $\pi$, proposals in the tails of $\pi$
+are generated rarely; when they do arise, the ratio $\pi(u^*)/q(u^*)$ is
+large but the reverse ratio $\pi(u^{(s)})/q(u^{(s)})$ is small, so the
+acceptance probability can be very low.  The chain then remains at the
+current state for long stretches, failing to explore the tails of $\pi$
+and producing highly autocorrelated samples with poor effective sample size.  The Laplace approximation matches the
+mode and local curvature of $\pi$, so it is a particularly effective proposal
+when the posterior is close to Gaussian — which holds for moderate-to-large
+$K_i$, where the likelihood dominates the prior and the posterior is
+approximately symmetric and light-tailed.
+
+% ============================================================
+\section{Convergence}
+% ============================================================
+
+\subsection{What does MCEM converge to?}
+
+Under regularity conditions (bounded Fisher information, identifiable model,
+compact parameter space), standard EM converges to a stationary point of
+$\ell(\btheta)$ — which may be a local maximum or a saddle point, not
+necessarily the global optimum (Dempster et al., 1977; Wu, 1983).
+In practice, multiple initialisations are used when the global maximum is
+required.  With a fixed MC sample size $m$, MCEM converges to a
+neighbourhood of a stationary point whose radius is $O(m^{-1/2})$
+(Chan \& Ledolter, 1995).
+
+\subsection{The convergence criterion}
+
+The implementation stops when both
+\[
+  \|\bbeta^{(t+1)} - \bbeta^{(t)}\| < \tau
+  \quad\text{and}\quad
+  \frac{|V_u^{(t+1)} - V_u^{(t)}|}{V_u^{(t)}} < \tau
+\]
+hold simultaneously for a user-specified tolerance $\tau > 0$.
+These criteria check that both parameters have stabilised, using an absolute
+norm for $\bbeta$ and a relative change for $V_u$ (since its scale is unknown a priori).
+
+\subsection{Cold-start initialisation}
+
+$\bbeta^{(0)}$ is set to the \emph{pooled logistic regression estimate} —
+the MLE of a standard logistic regression that pools all observations and
+ignores the random effect entirely.  This is obtained by L-BFGS-B.
+Although biased towards zero (attenuation due to the ignored heterogeneity),
+it is consistent for the sign and rough magnitude of $\bbeta$, avoids large
+initial Newton-Raphson steps, and keeps the Laplace proposals well-centred
+from the outset.
+
+% ============================================================
+\section{Summary of the Algorithm}
+% ============================================================
+
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+Step & Operation & Equation \\
+\midrule
+Init & Pooled logistic regression for $\bbeta^{(0)}$; set $V_u^{(0)}$ & --- \\
+     & Laplace approximation for all $i$: $(u_i^*, V_i^*)$ & \S6 \\
+\midrule
+E & Sample $u_i^{(1:m)} \sim \mathrm{MH}$ with $\N(u_i^*, V_i^*)$ proposal & \S7 \\
+  & Compute $\hat{S}$, $\hat{\mathcal{I}}$ by averaging over samples & \eqref{eq:score}, \eqref{eq:fisher} \\
+\midrule
+M & $\bbeta^{(t+1)} \leftarrow \bbeta^{(t)} + \alpha\,\hat{\mathcal{I}}^{-1}\hat{S}$ & \eqref{eq:nr-update} \\
+  & $V_u^{(t+1)} \leftarrow \dfrac{1}{nm}\displaystyle\sum_{i=1}^{n}\sum_{k=1}^{m}\bigl(u_i^{(k)}\bigr)^2$ \quad {\small(mean sq.\ MC draw)} & \eqref{eq:Vu-update} \\[6pt]
+  & Update Laplace proposals with warm starts & \S6 \\
+\midrule
+Stop & $\|\Delta\bbeta\| < \tau$ and $|\Delta V_u|/V_u < \tau$ & \S8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ============================================================
+\section*{References}
+% ============================================================
+
+\begin{itemize}
+  \item Chan, J.S.K. \& Ledolter, J. (1995). Monte Carlo EM estimation for time series models involving counts. \textit{Journal of the American Statistical Association}, 90(429), 242--252.
+  \item Wei, G.C.G. \& Tanner, M.A. (1990). A Monte Carlo implementation of the EM algorithm and the poor man's data augmentation algorithms. \textit{Journal of the American Statistical Association}, 85(411), 699--704.
+  \item Dempster, A.P., Laird, N.M. \& Rubin, D.B. (1977). Maximum likelihood from incomplete data via the EM algorithm. \textit{Journal of the Royal Statistical Society, Series B}, 39(1), 1--38.
+  \item Wu, C.F.J. (1983). On the convergence properties of the EM algorithm. \textit{The Annals of Statistics}, 11(1), 95--103.
+\end{itemize}
+
+\end{document}
