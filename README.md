@@ -152,5 +152,6 @@ demo/              simulation_study.py
 |---|---|
 | `make install` | Create `.venv` and install all dependencies |
 | `make test` | Run test suite with coverage report |
+| `make tutorial` | Open the tutorial notebook in Jupyter |
 | `make build` | Build sdist and wheel into `dist/` |
 | `make clear-cache` | Remove build artefacts and caches |
