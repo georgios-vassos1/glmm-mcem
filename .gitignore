@@ -1,10 +1,32 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
+*.egg-info/
+
+# Build / distribution
 build/
 dist/
 wheels/
-*.egg-info
 
-# Virtual environments
+# Virtual environment
 .venv
+
+# Testing & coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
